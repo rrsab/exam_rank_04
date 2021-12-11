@@ -1,17 +1,7 @@
-#include <stdlib.h>
+#include <stdio.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <string.h>
-
-#define SIDE_OUT	0
-#define SIDE_IN		1
-
-#define STDIN		0
-#define STDOUT		1
-#define STDERR		2
-
-#define TYPE_END	0
-#define TYPE_PIPE	1
-#define TYPE_BREAK	2
 
 #ifdef TEST_SH
 # define TEST		1
@@ -19,249 +9,118 @@
 # define TEST		0
 #endif
 
-typedef struct	s_list
+typedef struct s_cmd
 {
-	char			**args;
-	int				length;
-	int				type;
-	int				pipes[2];
-	struct s_list	*previous;
-	struct s_list	*next;
-}				t_list;
+	char **args;
+	int	pipe[2];
+	int prev_pipe;
+	int type[2];
+}	t_cmd;
 
-int ft_strlen(char const *str)
+int	ft_strlen(char *s)
 {
-	int	i;
+	int i;
 
 	i = 0;
-	while (str[i])
+	if (!s)
+		return (i);
+	while (s[i])
 		i++;
 	return (i);
 }
 
-int show_error(char const *str)
+int	lst_len(t_cmd *lst, int start, char **argv)
 {
-	if (str)
-		write(STDERR, str, ft_strlen(str));
-	return (EXIT_FAILURE);
-}
+	int end;
+	int len;
 
-int exit_fatal(void)
-{
-	show_error("error: fatal\n");
-	exit(EXIT_FAILURE);
-	return (EXIT_FAILURE);
-}
-
-void *exit_fatal_ptr(void)
-{
-	exit_fatal();
-	exit(EXIT_FAILURE);
-	return (NULL);
-}
-
-char *ft_strdup(char const *str)
-{
-	char	*copy;
-	int		i;
-
-	if (!(copy = (char*)malloc(sizeof(*copy) * (ft_strlen(str) + 1))))
-		return (exit_fatal_ptr());
-	i = 0;
-	while (str[i])
+	end = start;
+	while (argv[end] && strcmp(argv[end], ";") && strcmp(argv[end], "|"))
+		end++;
+	len = end - start;
+	if (len > 0)
 	{
-		copy[i] = str[i];
-		i++;
+		lst->args = &argv[start];
+		lst->type[0] = lst->type[1];
+		if (!argv[end])		 //конец строки
+			lst->type[1] = 0;
+		else if (!strcmp(argv[end], "|"))
+			lst->type[1] = 1;
+		else
+			lst->type[1] = 2; // ";"
+		argv[end] = NULL;	// NULL для разделения двумерного массива
+		lst->prev_pipe = lst->pipe[0];
 	}
-	copy[i] = 0;
-	return (copy);
+	return (end);
 }
 
-int add_arg(t_list *cmd, char *arg)
+void fatal()
 {
-	char	**tmp;
-	int		i;
-
-	i = 0;
-	tmp = NULL;
-	if (!(tmp = (char**)malloc(sizeof(*tmp) * (cmd->length + 2))))
-		return (exit_fatal());
-	while (i < cmd->length)
-	{
-		tmp[i] = cmd->args[i];
-		i++;
-	}
-	if (cmd->length > 0)
-		free(cmd->args);
-	cmd->args = tmp;
-	cmd->args[i++] = ft_strdup(arg);
-	cmd->args[i] = 0;
-	cmd->length++;
-	return (EXIT_SUCCESS);
+	write(2, "error: fatal\n", ft_strlen("error: fatal\n"));
+	exit(1);
 }
 
-int list_push(t_list **list, char *arg)
-{
-	t_list	*new;
-
-	if (!(new = (t_list*)malloc(sizeof(*new))))
-		return (exit_fatal());
-	new->args = NULL;
-	new->length = 0;
-	new->type = TYPE_END;
-	new->previous = NULL;
-	new->next = NULL;
-	if (*list)
-	{
-		(*list)->next = new;
-		new->previous = *list;
-	}
-	*list = new;
-	return (add_arg(new, arg));
-}
-
-int list_rewind(t_list **list)
-{
-	while (*list && (*list)->previous)
-		*list = (*list)->previous;
-	return (EXIT_SUCCESS);
-}
-
-int list_clear(t_list **cmds)
-{
-	t_list	*tmp;
-	int		i;
-
-	list_rewind(cmds);
-	while (*cmds)
-	{
-		tmp = (*cmds)->next;
-		i = 0;
-		while (i < (*cmds)->length)
-			free((*cmds)->args[i++]);
-		free((*cmds)->args);
-		free(*cmds);
-		*cmds = tmp;
-	}
-	*cmds = NULL;
-	return (EXIT_SUCCESS);
-}
-
-int parse_arg(t_list **cmds, char *arg)
-{
-	int	is_break;
-
-	is_break = (strcmp(";", arg) == 0);
-	if (is_break && !*cmds)
-		return (EXIT_SUCCESS);
-	else if (!is_break && (!*cmds || (*cmds)->type > TYPE_END))
-		return (list_push(cmds, arg));
-	else if (strcmp("|", arg) == 0)
-		(*cmds)->type = TYPE_PIPE;
-	else if (is_break)
-		(*cmds)->type = TYPE_BREAK;
-	else
-		return (add_arg(*cmds, arg));
-	return (EXIT_SUCCESS);
-}
-
-int exec_cmd(t_list *cmd, char **env)
+void	exec_cmd(t_cmd *lst, char **envp)
 {
 	pid_t	pid;
 	int		ret;
-	int		status;
-	int		pipe_open;
 
-	ret = EXIT_FAILURE;
-	pipe_open = 0;
-	if (cmd->type == TYPE_PIPE || (cmd->previous && cmd->previous->type == TYPE_PIPE))
+	if ((lst->type[1] == 1 || lst->type[0] == 1) && (pipe(lst->pipe)))
+		fatal();
+	if ((pid = fork()) < 0)
+		fatal();
+	if (pid == 0)
 	{
-		pipe_open = 1;
-		if (pipe(cmd->pipes))
-			return (exit_fatal());
-	}
-	pid = fork();
-	if (pid < 0)
-		return (exit_fatal());
-	else if (pid == 0)
-	{
-		if (cmd->type == TYPE_PIPE
-			&& dup2(cmd->pipes[SIDE_IN], STDOUT) < 0)
-			return (exit_fatal());
-		if (cmd->previous && cmd->previous->type == TYPE_PIPE
-			&& dup2(cmd->previous->pipes[SIDE_OUT], STDIN) < 0)
-			return (exit_fatal());
-		if ((ret = execve(cmd->args[0], cmd->args, env)) < 0)
+		if ((lst->type[1] == 1) && (dup2(lst->pipe[1], 1)) < 0)
+			fatal();
+		if ((lst->type[0] == 1) && (dup2(lst->prev_pipe, 0)) < 0)
+			fatal();
+		if ((ret = execve(lst->args[0], lst->args, envp)) < 0)
 		{
-			show_error("error: cannot execute ");
-			show_error(cmd->args[0]);
-			show_error("\n");
+			write(2, "error: cannot execute ", 22);
+			write(2, lst->args[0], ft_strlen(lst->args[0]));
+			write(2, "\n", 1);
 		}
 		exit(ret);
 	}
 	else
 	{
-		waitpid(pid, &status, 0);
-		if (pipe_open)
+		waitpid(pid, 0, 0);
+		if (lst->type[1] == 1 || lst->type[0] == 1)
 		{
-			close(cmd->pipes[SIDE_IN]);
-			if (!cmd->next || cmd->type == TYPE_BREAK)
-				close(cmd->pipes[SIDE_OUT]);
-		}
-		if (cmd->previous && cmd->previous->type == TYPE_PIPE)
-			close(cmd->previous->pipes[SIDE_OUT]);
-		if (WIFEXITED(status))
-			ret = WEXITSTATUS(status);
-	}
-	return (ret);
-}
-
-int exec_cmds(t_list **cmds, char **env)
-{
-	t_list	*crt;
-	int		ret;
-
-	ret = EXIT_SUCCESS;
-	list_rewind(cmds);
-	while (*cmds)
-	{
-		crt = *cmds;
-		if (strcmp("cd", crt->args[0]) == 0)
-		{
-			ret = EXIT_SUCCESS;
-			if (crt->length < 2)
-				ret = show_error("error: cd: bad arguments\n");
-			else if (chdir(crt->args[1]))
-			{
-				ret = show_error("error: cd: cannot change directory to ");
-				show_error(crt->args[1]);
-				show_error("\n");
+			close(lst->pipe[1]);
+			if (lst->type[1] != 1)
+				close(lst->pipe[0]);
 			}
-		}
-		else
-			ret = exec_cmd(crt, env);
-		if (!(*cmds)->next)
-			break ;
-		*cmds = (*cmds)->next;
+		if (lst->type[0] == 1)
+			close(lst->prev_pipe);
 	}
-	return (ret);
 }
 
-int main(int argc, char **argv, char **env)
+int	main(int argc, char **argv, char **env)
 {
-	t_list	*cmds;
+	t_cmd	lst;
 	int		i;
-	int		ret;
+	int		start;
 
-	ret = EXIT_SUCCESS;
-	cmds = NULL;
-	i = 1;
-	while (i < argc)
-		parse_arg(&cmds, argv[i++]);
-	if (cmds)
-		ret = exec_cmds(&cmds, env);
-	list_clear(&cmds);
+	i = 0;
+	while (i < argc && argv[++i])
+	{
+		start = i;
+		i = lst_len(&lst, i, argv);
+		if (!strcmp(argv[start], "cd"))
+		{
+			if (i - start != 2)
+				write(2, "error: cd: cannot change directory to ", \
+				ft_strlen("error: cd: cannot change directory to "));
+			write(2, lst.args[1], ft_strlen(lst.args[1]));
+			write(2, "\n", 1);
+		}
+		else if (i > start)
+			exec_cmd(&lst, env);
+	}
 	if (TEST)
 		while (1);
-	return (ret);
+	return (0);
 }
+
